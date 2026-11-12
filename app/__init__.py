@@ -1,0 +1,2 @@
+"""CircuitMind AI - Application Package"""
+

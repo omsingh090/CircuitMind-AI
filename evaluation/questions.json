@@ -1,0 +1,115 @@
+[
+  {
+    "id": "Q01",
+    "question": "What is the scale factor of the LM35 temperature sensor?",
+    "category": "features",
+    "expected_pages": [1, 13, 15],
+    "expected_keywords": ["10-mV/°C", "10 mV/°C", "scale factor", "linear", "mV/°C"]
+  },
+  {
+    "id": "Q02",
+    "question": "What is the recommended operating supply voltage range for the LM35?",
+    "category": "specifications",
+    "expected_pages": [1, 4, 19],
+    "expected_keywords": ["4 V to 30 V", "4-V to 30-V", "4 V to 20 V", "supply voltage", "operating"]
+  },
+  {
+    "id": "Q03",
+    "question": "What are the absolute maximum ratings for the supply voltage and output voltage of the LM35?",
+    "category": "electrical_limits",
+    "expected_pages": [4],
+    "expected_keywords": ["Absolute Maximum Ratings", "Supply voltage", "35", "Output voltage", "6"]
+  },
+  {
+    "id": "Q04",
+    "question": "What is the typical quiescent current of the LM35 at 25°C?",
+    "category": "specifications",
+    "expected_pages": [1, 7, 10],
+    "expected_keywords": ["quiescent current", "56", "μA", "current drain", "quiescent"]
+  },
+  {
+    "id": "Q05",
+    "question": "What package options and pinouts are available for the LM35?",
+    "category": "pinout_and_package",
+    "expected_pages": [1, 3],
+    "expected_keywords": ["TO-CAN", "TO-92", "SOIC", "TO-220", "NDV", "LP", "pinout", "VOUT"]
+  },
+  {
+    "id": "Q06",
+    "question": "What is the ensured accuracy of the LM35A at 25°C?",
+    "category": "accuracy",
+    "expected_pages": [1, 5, 13],
+    "expected_keywords": ["0.5°C", "accuracy", "LM35A", "25°C", "ensured"]
+  },
+  {
+    "id": "Q07",
+    "question": "What is the rated operating temperature range for the full-range LM35 and LM35A devices?",
+    "category": "specifications",
+    "expected_pages": [1, 4, 5, 13],
+    "expected_keywords": ["−55°C to 150°C", "-55°C to 150°C", "temperature range", "rated", "operating"]
+  },
+  {
+    "id": "Q08",
+    "question": "How does the basic centigrade temperature sensor circuit operate for temperatures from 2°C to 150°C?",
+    "category": "application_circuits",
+    "expected_pages": [15],
+    "expected_keywords": ["Basic Centigrade Temperature Sensor", "Figure 14", "2 °C to 150 °C", "VOUT", "10 mV/°C"]
+  },
+  {
+    "id": "Q09",
+    "question": "How can the LM35 be configured for full-range negative and positive temperature sensing down to -55°C?",
+    "category": "application_circuits",
+    "expected_pages": [1, 15],
+    "expected_keywords": ["Full-Range Centigrade Temperature Sensor", "Figure 15", "-VS", "pull-down", "resistor"]
+  },
+  {
+    "id": "Q10",
+    "question": "What bypass capacitor is recommended on the power supply pin in noisy environments?",
+    "category": "hardware_design",
+    "expected_pages": [14, 19, 20],
+    "expected_keywords": ["0.1 μF", "0.1 µF", "0.01 µF", "bypass", "capacitor", "power supply", "noisy"]
+  },
+  {
+    "id": "Q11",
+    "question": "How should the LM35 be mounted or cemented to a surface for accurate temperature tracking and minimal self-heating?",
+    "category": "thermal_layout",
+    "expected_pages": [1, 19],
+    "expected_keywords": ["glue", "cement", "epoxy", "thermal", "self-heating", "surface temperature", "leads"]
+  },
+  {
+    "id": "Q12",
+    "question": "How can the LM35 drive heavy capacitive loads without oscillation?",
+    "category": "hardware_design",
+    "expected_pages": [14],
+    "expected_keywords": ["capacitive load", "damper", "R-C", "resistor", "75", "bypass", "oscillation", "wiring"]
+  },
+  {
+    "id": "Q13",
+    "question": "What is the typical non-linearity of the LM35 temperature sensor across its rated range?",
+    "category": "accuracy",
+    "expected_pages": [1, 5, 8, 13],
+    "expected_keywords": ["non-linearity", "±¼°C", "±0.18°C", "deviation", "straight line"]
+  },
+  {
+    "id": "Q14",
+    "question": "What ESD rating does the LM35 have according to the Human Body Model?",
+    "category": "electrical_limits",
+    "expected_pages": [4],
+    "expected_keywords": ["ESD", "Human Body Model", "HBM", "2500", "2500 V"]
+  },
+  {
+    "id": "Q15",
+    "question": "How can the LM35 be connected as a two-wire remote temperature sensor?",
+    "category": "application_circuits",
+    "expected_pages": [16],
+    "expected_keywords": ["Two-Wire Remote Temperature Sensor", "Figure 16", "Figure 17", "twisted pair", "remote"]
+  },
+  {
+    "id": "Q16",
+    "question": "What orderable part numbers and packaging options are available for the LM35?",
+    "category": "ordering",
+    "expected_pages": [3, 22, 23],
+    "expected_keywords": ["LM35DZ", "LM35CZ", "LM35AH", "TO-92", "TO-CAN", "orderable", "package"]
+  }
+]
+
