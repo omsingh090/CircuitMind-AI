@@ -3,13 +3,13 @@
 [![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-1.0.0-009688.svg?style=flat&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![LangGraph](https://img.shields.io/badge/LangGraph-StateGraph-1C3C3C.svg?style=flat)](https://github.com/langchain-ai/langgraph)
-[![Google Gemini](https://img.shields.io/badge/Google%20GenAI-Gemini%203.8%20Flash-4285F4.svg?style=flat&logo=google&logoColor=white)](https://ai.google.dev/)
+[![Google Gemini](https://img.shields.io/badge/Google%20GenAI-Gemini%20API-4285F4.svg?style=flat&logo=google&logoColor=white)](https://ai.google.dev/)
 [![ChromaDB](https://img.shields.io/badge/ChromaDB-Vector%20Store-FF6F00.svg?style=flat)](https://www.trychroma.com/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-UI%20Dashboard-FF4B4B.svg?style=flat&logo=streamlit&logoColor=white)](https://streamlit.io/)
-[![Tests](https://img.shields.io/badge/Software%20Tests-120%20Passed%20(100%25)-brightgreen.svg?style=flat)](#testing--verification)
-[![Warm Retrieval Latency](https://img.shields.io/badge/Warm%20Retrieval-Avg%2026.18ms-blueviolet.svg?style=flat)](#performance-benchmarks)
+[![Tests](https://img.shields.io/badge/Software%20Tests-140%20Passed%20(100%25)-brightgreen.svg?style=flat)](#testing--verification)
+[![Warm Retrieval Latency](https://img.shields.io/badge/Local%20Warm%20Retrieval-Avg%2026.18ms-blueviolet.svg?style=flat)](#performance-benchmarks)
 
-**CircuitMind AI** is an agentic AI copilot engineered for electronics hardware designers and embedded systems engineers. It combines **LangGraph multi-agent orchestration**, a **grounded sub-50ms Hybrid RAG engine (ChromaDB + BM25 + Reciprocal Rank Fusion)**, and **deterministic Python electrical validation tools** to review component constraints, extract verified datasheet specifications, perform physics calculations, and generate structured engineering reports with page-level citations.
+**CircuitMind AI** is an agentic AI copilot engineered for electronics hardware designers and embedded systems engineers. It combines **LangGraph multi-agent orchestration**, a **grounded Hybrid RAG engine (ChromaDB + BM25 + Reciprocal Rank Fusion, with local warm retrieval measured at ~26ms)**, and **deterministic Python electrical validation tools** to review component constraints, extract verified datasheet specifications, perform physics calculations, and generate structured engineering reports with page-level citations.
 
 ---
 
@@ -140,27 +140,30 @@ stateDiagram-v2
 ```
 
 ### 1. `RequirementAgent` (`extract_requirements`)
-- **Role:** Extracts explicit technical requirements (`target_supply_voltage_v`, `target_max_current_ma`, `adc_reference_v`, `operating_temp_min_c`, `operating_temp_max_c`, `load_resistance_ohms`) using structured regular expressions and domain heuristics.
-- **Safety Feature:** Strictly disambiguates sensor supply voltage from ADC reference voltage. Explicitly marks unspecified parameters under `missing_requirements` without guessing.
+- **Role:** Extracts explicit technical requirements (`target_supply_voltage_v`, `target_max_current_ma`, `adc_reference_v`, `adc_resolution_bits`, `operating_temp_min_c`, `operating_temp_max_c`, `load_resistance_ohms`) and identifies specific component variants (`LM35D`, `LM35A`, `LM35C`, `LM35CA`, `LM35DZ`) using structured regular expressions and domain heuristics.
+- **Safety Feature:** Strictly disambiguates sensor supply voltage from ADC reference voltage. Supports Unicode en-dash (`–`), em-dash (`—`), minus (`−`), hyphen (`-`), and `to` for temperature ranges. Explicitly marks unspecified parameters under `missing_requirements` without guessing.
 
 ### 2. `ResearchAgent` (`retrieve_evidence`)
 - **Role:** Gathers grounded datasheet passages from ChromaDB and BM25 using Hybrid RAG with Reciprocal Rank Fusion (RRF).
 - **Provenance:** Injects component part numbers and electrical keywords, preserving source PDF filenames, exact page numbers, and chunk IDs for all candidates.
 
 ### 3. `ComponentAgent` (`extract_specifications`)
-- **Role:** Synthesizes verified electrical ratings directly from retrieved passages: recommended supply voltage range, absolute maximum supply, quiescent current, scale factor, and operating temperature range.
-- **Citation Integrity:** Every verified parameter is linked to a citation (e.g., `[lm35.pdf, p. 1]`). Missing parameters are placed into `unverified_or_missing_specs`.
+- **Role:** Synthesizes verified electrical ratings directly from retrieved passages, categorizing each parameter into standardized engineering classifications (`Recommended Operating Conditions`, `Absolute Maximum Ratings`, `Electrical Characteristics`, `Typical Characteristics`, `Guaranteed or tested limits`).
+- **Citation Integrity & Verbatim Evidence:** Every parameter preserves numeric bounds (`min_val`, `max_val`), units, operating conditions, source citation `[filename, p. X]`, and verbatim `evidence_text`. Preserves official TI variant-specific temperature ratings (LM35/LM35A: -55°C to 150°C, LM35C/LM35CA: -40°C to 110°C, LM35D: 0°C to 100°C) and separates typical quiescent current (56 µA at 25°C, 5V) from tested (67 µA) and guaranteed design limits (131 µA over temperature).
 
 ### 4. `ValidationAgent` (`validate_electrical`)
 - **Role:** Executes deterministic electrical calculations using `ElectricalCalculator`:
-  - **Ohm's Law:** Voltage, current, or load resistance validation ($V = I \times R$).
-  - **Quiescent Power Dissipation:** $P_Q = V_{CC} \times I_Q$.
-  - **Supply Voltage Compatibility:** Verifies $V_{CC}$ falls strictly between $V_{min}$ and $V_{max\_recommended}$.
-  - **ADC Interface Compatibility:** Compares sensor output voltage at maximum operating temperature against the ADC reference voltage to flag analog saturation.
-- **Outcome Statuses:** `PASS`, `FAIL`, and `UNVERIFIED`. Design validity resolves to `VALID` (all pass), `INVALID` ($\ge 1$ fail), or `INCONCLUSIVE` (unverified parameters present without outright failure).
+  - **Ohm's Law & Quiescent Power:** Voltage, current, load resistance validation ($V = I \times R$), and quiescent dissipation ($P_Q = V_{CC} \times I_Q$).
+  - **Supply Voltage Compatibility:** Verifies $V_{CC}$ falls strictly between $V_{min}$ and $V_{max\_recommended}$ with absolute maximum rating protection.
+  - **Component Variant Temperature Validation:** Validates operating temperatures against official datasheet variant ratings (flags violations e.g. LM35D at 125°C).
+  - **Transfer Output Voltage Calculations:** Computes nominal sensor transfer outputs at 0°C, 25°C, and 100°C with guaranteed tolerance bounds.
+  - **ADC Interface Compatibility & Quantization:** Verifies static voltage-range compatibility ($V_{\text{out\_max}} \le V_{\text{ADC\_ref}}$), computes clipping saturation temperatures ($T_{sat} = V_{ref} \times 1000 / S$), $N$-bit quantization step ($V_{LSB} = V_{ref} / 2^N$), and temperature resolution per count ($T_{res} = V_{LSB} / S$).
+  - **Scope Distinction & Unverified Parameters:** Explicitly distinguishes static voltage-range compatibility from complete ADC interface validation. Dynamic parameters—including SAR sample-and-hold acquisition time ($t_{acq}$), ADC pin input leakage current ($I_{leak}$), driving source impedance limits ($R_S$), and overvoltage clamp protection requirements—cannot be determined from static DC parameters alone and remain `UNVERIFIED` unless external signal-conditioning circuitry is specified.
+  - **Output Load Boundary Check:** Computes static DC load current ($I_{\text{load}} = V_{\text{out\_max}} / R_{\text{load}}$) and compares it against the LM35 absolute-maximum output-current rating (10 mA). This check solely flags catastrophic overload exceeding the absolute-maximum limit; it does NOT verify recommended continuous operating currents, self-heating thermal errors ($\Delta T = P_D \cdot \theta_{JA}$), or guaranteed linear output regulation under load.
+- **Outcome Statuses:** `PASS`, `FAIL`, and `UNVERIFIED`. Design validity resolves strictly to `VALID` (all pass), `INVALID` ($\ge 1$ fail or safety violation), or `INCONCLUSIVE` (unverified parameters without outright failure). A definite `FAIL` is never overridden by `UNVERIFIED` checks.
 
 ### 5. `ReportAgent` (`generate_report`)
-- **Role:** Compiles the complete structured engineering response: executive summary, design requirements, verified specifications, deterministic validation table, warning notices, reference citations, and the mandatory engineering disclaimer.
+- **Role:** Compiles the complete structured engineering response: executive summary synchronized with validation status, design requirements, verified specifications with verbatim evidence and page citations, deterministic validation table, warning notices, reference citations, and the mandatory engineering disclaimer.
 
 ---
 
@@ -359,7 +362,10 @@ STREAMLIT_SERVER_PORT=8501
 CIRCUITMIND_API_URL=http://127.0.0.1:8000
 ```
 
-> **Model Compatibility Note:** Google AI Studio has updated default model recommendations. CircuitMind AI defaults to `gemini-3.8-flash` for grounded technical Q&A synthesis.
+> **Gemini Model Configuration & Fallback:**
+> - In `app/config.py`, the application code defines a fallback default of `gemini-2.5-flash` if `GEMINI_MODEL` is not set in the environment.
+> - The provided `.env.example` template configures `GEMINI_MODEL=gemini-3.8-flash`.
+> - Model availability, preview lifecycles, and rate limits vary across Google AI Studio account tiers and regions. Set `GEMINI_MODEL` in `.env` to a model ID currently enabled and verified on your Google AI Studio account. Do not assume a specific model identifier is globally supported without checking your active API key access.
 
 ---
 
@@ -674,41 +680,52 @@ CircuitMind AI maintains an automated test suite verifying every component from 
 platform win32 -- Python 3.11.9, pytest-9.2.0, pluggy-1.7.0
 rootdir: C:\Users\hp\OneDrive\Desktop\CircuitMind-AI
 plugins: anyio-4.16.0, langsmith-0.14.17, asyncio-1.4.1.post1
-collected 120 items
+asyncio: mode=Mode.STRICT, debug=False
+collected 140 items
 
-tests/test_agents.py ....................................                [ 10%]
-tests/test_answer_generator.py .................                         [ 24%]
-tests/test_api.py ........                                               [ 30%]
-tests/test_electrical_calculator.py .....................                [ 48%]
-tests/test_frontend.py ..........................                        [ 66%]
-tests/test_retrieval.py .............                                    [ 77%]
-tests/test_retrieval_performance.py .....                                [ 81%]
-tests/test_run_workflow.py .....                                         [ 85%]
-tests/test_validation_reliability.py ..............                      [ 97%]
-tests/test_workflow.py ...                                               [100%]
+tests\test_agents.py ............                                        [  8%]
+tests\test_answer_generator.py .......................                   [ 25%]
+tests\test_api.py .........                                              [ 31%]
+tests\test_electrical_calculator.py ....................                 [ 45%]
+tests\test_evaluation.py ..                                              [ 47%]
+tests\test_frontend.py .....................                             [ 62%]
+tests\test_ingestion.py ....                                             [ 65%]
+tests\test_retrieval.py .............                                    [ 74%]
+tests\test_retrieval_performance.py .....                                [ 77%]
+tests\test_run_workflow.py .....                                         [ 81%]
+tests\test_validation_reliability.py .......................             [ 97%]
+tests\test_workflow.py ...                                               [100%]
 
-======================= 120 passed, 1 warning in 20.75s =======================
+======================= 140 passed, 1 warning in 68.32s =======================
 ```
 
-> **Testing Scope Disclaimer:** Passing all 120 automated software tests verifies software code correctness, Pydantic schema contracts, state graph node transitions, and deterministic Python math execution. **It does NOT constitute proof of physical circuit safety or hardware fabrication readiness.** Physical engineering verification is always mandatory.
+> **Verified Test Run History:**
+> - **Latest Verified Run:** 140 passed, 1 warning in **68.32 seconds** (measured across all 12 test modules during full end-to-end regression testing).
+> - **Earlier Test Run:** 140 passed, 1 warning in **16.73 seconds** (measured under warm OS disk cache and reduced background system load).
+> - Both runs verify 100% test pass rate across all 140 test cases. The 68.32s result represents the latest verified end-to-end run and should not be conflated with earlier cached runs.
+>
+> **Testing Scope Disclaimer:** Passing all 140 automated software tests verifies software code correctness, Pydantic schema contracts, state graph node transitions, and deterministic Python math execution. **It does NOT constitute proof of physical circuit safety or hardware fabrication readiness.** Physical engineering verification is always mandatory.
 
 ---
 
 ## Performance Benchmarks
 
-### Live Measurement Results
+### Local Measured Benchmark Results
 
-| Execution Type | Tested Workload | Measured Wall Time | Result & Reliability |
+> **Benchmark Scope & Disclaimer:** The latency and timing metrics below represent local measured results obtained on a Windows 11 development machine (Python 3.11.9, Intel Core i7, 16GB RAM). They serve as empirical performance indicators for developers, not guaranteed production SLAs or fixed cross-platform speedup multipliers. Actual latency depends on CPU performance, disk I/O, cache warming, and Python runtime overhead.
+
+| Execution Type | Tested Workload | Local Measured Wall Time | Result & Reliability |
 | :--- | :--- | :--- | :--- |
 | **Pure Datasheet Retrieval** | 5 consecutive live hybrid queries (`POST /api/v1/retrieve`) | **16.43 ms – 61.50 ms** (Avg: **26.18 ms**) | 100% precision, exact citations preserved |
 | **Full Copilot Analysis** | 3 full 5-stage workflows (`POST /api/v1/analyze`) | **42.19 ms – 181.15 ms** wall time | All 5 agents completed in all 3 runs |
-| **Complete Test Suite** | Full test regression suite (120 test cases) | **20.75 seconds** | **120 / 120 PASSED (100%)** |
+| **Complete Test Suite (Latest)** | Full regression suite (140 test cases) | **68.32 seconds** | **140 / 140 PASSED (100%)** |
+| **Complete Test Suite (Earlier Warm Run)** | Full regression suite (140 test cases) | **16.73 seconds** | **140 / 140 PASSED (100%)** |
 
-### Cold-Start Optimization vs. Warm Retrieval
-It is crucial to distinguish **cold-start model initialization** from **warm retrieval latency**:
-1. **Unoptimized Cold Start (~35.57 seconds):** Without optimization, instantiating `HuggingFaceEmbeddings` triggers `huggingface_hub` remote HTTP connectivity checks. In restricted or offline environments, these trigger socket DNS timeouts and a 5-step exponential backoff retry loop (1s + 2s + 4s + 8s + 16s = ~31s) plus socket timeouts (~4.5s).
-2. **Cold-Start Optimization (~1.2 seconds once at boot):** By configuring `model_kwargs={"local_files_only": True}` and pre-warming the shared singleton retriever during FastAPI startup lifespan, remote network checks are bypassed entirely.
-3. **Warm Request Latency (16.43–61.50 ms, average 26.18 ms):** Once warm in memory, the embedding model, ChromaDB persistent client, and BM25 index execute hybrid search, deduplication, and RRF scoring in milliseconds.
+### Cold-Start Optimization vs. Warm Retrieval Performance
+It is crucial to distinguish **cold-start model initialization** from **warm-request retrieval performance**:
+1. **Unoptimized Cold Start (~35.57 seconds measured):** In cold-start environments without local caching, instantiating `HuggingFaceEmbeddings` triggers `huggingface_hub` remote HTTP connectivity checks. In restricted or offline environments, these trigger socket DNS timeouts and a 5-step exponential backoff retry loop (1s + 2s + 4s + 8s + 16s = ~31s) plus socket timeouts (~4.5s).
+2. **Cold-Start Optimization (~1.2 seconds measured locally at boot):** By configuring `model_kwargs={"local_files_only": True}` and pre-warming the shared singleton retriever during FastAPI startup lifespan, remote network checks are bypassed, loading cached model weights directly from disk in approximately 1.2s locally.
+3. **Warm-Request Latency (16.43–61.50 ms, average 26.18 ms local measured):** Once warm in memory, the embedding model, ChromaDB persistent client, and BM25 index execute hybrid search, deduplication, and RRF scoring without reinitialization overhead. Latency varies depending on query complexity and host load.
 
 ---
 
@@ -728,13 +745,21 @@ ChromaDB is instantiated via `chromadb.PersistentClient` targeting the directory
 ## Limitations & Engineering Safety Disclaimer
 
 ### Mandatory Safety Disclaimer
-> **IMPORTANT: PRELIMINARY COPILOT DESIGN**  
-> CircuitMind AI provides automated engineering assistance and preliminary calculations based on digital datasheets. **All outputs, pin assignments, operating voltages, and component recommendations are strictly preliminary and NOT fabrication-ready.** Hardware engineers must verify all designs against physical datasheets, perform SPICE simulations, and test prototype circuits on a physical breadboard using calibrated bench power supplies, digital multimeters, and oscilloscopes before manufacturing printed circuit boards (PCBs).
+> **IMPORTANT: PRELIMINARY COPILOT DESIGN — NOT FABRICATION-READY**  
+> CircuitMind AI provides automated engineering assistance and preliminary calculations based on digital datasheets. **All outputs, pin assignments, operating voltages, component recommendations, and reports are strictly preliminary and NOT fabrication-ready.** Hardware engineers must verify all designs against physical datasheets, perform SPICE simulations, and test prototype circuits on a physical breadboard using calibrated bench power supplies, digital multimeters, and oscilloscopes before manufacturing printed circuit boards (PCBs).
 
 ### Current Project Limitations
 - **Local Developer Environment:** Engineered and tested for local developer execution on Windows with Python 3.11; not deployed to cloud infrastructure.
+- **Component Variant Uncertainty:** When a generic component family (e.g., `LM35`) is specified without an explicit orderable part suffix (`LM35A`, `LM35C`, `LM35CA`, `LM35D`, `LM35DZ`), the validator evaluates the query against the full-span base LM35 datasheet ratings (-55°C to 150°C) rather than assuming a restricted commercial sub-variant. However, it generates an explicit `GENERIC PART NUMBER UNCERTAINTY` warning alerting the engineer that commercial-grade devices (`LM35D` / `LM35DZ`) are strictly rated for 0°C to 100°C and will violate limits if deployed across the wider temperature span.
+- **Output Load Validation Limitation:** The load check solely evaluates whether static DC load current exceeds the LM35 10 mA absolute-maximum rating. The 10 mA limit is a catastrophic physical damage boundary, not a recommended continuous operating current or guaranteed drive level. Sourcing appreciable current from an LM35 causes internal die self-heating that degrades temperature measurement accuracy (the LM35 is designed for high-impedance loads, typically under $50\ \mu\text{A}$ to $1\text{ mA}$ for minimal self-heating). Output regulation droop, dynamic drive capabilities, and loop stability are not simulated by the static validator.
+- **Static vs. Dynamic ADC Validation:** CircuitMind AI deterministically evaluates static DC full-scale input voltage range ($V_{out\_max} \le V_{ADC\_ref}$), clipping saturation temperatures ($T_{sat}$), and ideal quantization steps ($V_{LSB}$). However, complete dynamic ADC interface validation is **unsupported**:
+  - *Dynamic Sampling Dynamics:* SAR sample-and-hold acquisition time ($t_{acq}$), internal sampling capacitor charging, and switch resistance are not simulated.
+  - *Anti-Aliasing & Filtering:* Nyquist low-pass anti-aliasing filter cut-off frequencies, roll-off slopes, and phase distortion are not analyzed.
+  - *Impedance, Acquisition & Leakage:* Allowable driving source impedance is not fixed (there is no universal 10 kΩ rule); it depends on the specific ADC's internal sampling capacitance ($C_{\text{sample}}$), multiplexer switch on-resistance ($R_{\text{sw}}$), sampling acquisition window ($t_{\text{acq}}$), converter resolution ($N$ bits), and settling error requirements ($< \frac{1}{2}\text{ LSB}$). Without ADC-specific timing and input network models, source impedance compatibility, dynamic settling, input leakage current ($I_{\text{leak}}$), and transient clamp diode protection remain `UNVERIFIED`.
+- **ADC Interface Capacitive Loading:** Driving capacitive loads greater than $50\text{ pF}$ directly from an LM35 causes output ringing or oscillation; a series isolation resistor ($75\ \Omega\text{ to } 1\text{ k}\Omega$) or RC damper circuit is required.
+- **Single-Supply Negative Temperature Limitation:** An LM35 powered from a single positive supply cannot measure temperatures below $0^\circ\text{C}$ without a pull-down resistor connected to a negative bias rail ($V^-$), as detailed in TI datasheet Section 9.2.2.
 - **Datasheet Scope:** Current default indexed collection focuses on analog and sensing components (e.g., LM35, LM7805, standard passives). Additional components require indexing via `scripts/ingest.py`.
-- **Single-Rail DC Focus:** Deterministic checks currently evaluate DC voltage limits, quiescent power, single-stage resistive loads, and ADC input voltage ranges. Complex AC impedance matching, high-frequency RF routing, and switching regulator EMI are not modeled.
+- **Single-Rail DC Focus:** Deterministic checks currently evaluate DC voltage limits, quiescent power, single-stage resistive loads, and static ADC input voltage ranges. Complex AC impedance matching, high-frequency RF routing, and switching regulator EMI are not modeled.
 
 ---
 
