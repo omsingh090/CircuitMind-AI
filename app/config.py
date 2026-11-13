@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     gemini_model: str = Field(default="gemini-2.5-flash", alias="GEMINI_MODEL")
     gemini_temperature: float = 0.0
     gemini_max_tokens: int = 800
+    gemini_timeout_seconds: float = Field(default=30.0, alias="GEMINI_TIMEOUT_SECONDS")
 
     @field_validator("gemini_model", mode="before")
     @classmethod

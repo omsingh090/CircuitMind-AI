@@ -309,8 +309,12 @@ class ElectricalCalculator:
         temperature_c: float,
         scale_factor_mv_per_c: float = 10.0,
         offset_v: float = 0.0,
+        accuracy_tolerance_c: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Deterministically calculate linear sensor output voltage from temperature.
+
+        Distinguishes nominal mathematical transfer function output from guaranteed
+        datasheet accuracy tolerance bounds.
 
         Formula:
             V_out(mV) = (temperature_c * scale_factor_mv_per_c) + (offset_v * 1000)
@@ -320,9 +324,11 @@ class ElectricalCalculator:
             temperature_c: Temperature in degrees Celsius (°C).
             scale_factor_mv_per_c: Sensor sensitivity in mV/°C (default: 10.0 for LM35).
             offset_v: Output voltage offset at 0°C in Volts (default: 0.0V for LM35).
+            accuracy_tolerance_c: Optional guaranteed accuracy tolerance in °C (e.g. ±0.5°C).
 
         Returns:
-            Dictionary with computed output in millivolts and Volts, formula, and input values.
+            Dictionary with nominal output in millivolts and Volts, formula, and optional
+            min/max tolerance bounds.
         """
         for val, name in [
             (temperature_c, "temperature_c"),
@@ -332,24 +338,239 @@ class ElectricalCalculator:
             if math.isnan(val) or math.isinf(val):
                 raise ValueError(f"Parameter '{name}' must be finite.")
 
+        if accuracy_tolerance_c is not None:
+            if math.isnan(accuracy_tolerance_c) or math.isinf(accuracy_tolerance_c) or accuracy_tolerance_c < 0:
+                raise ValueError("accuracy_tolerance_c must be a non-negative finite value.")
+
         if scale_factor_mv_per_c <= 0:
             raise ValueError("Scale factor must be strictly positive (> 0 mV/°C).")
 
         v_out_mv = (temperature_c * scale_factor_mv_per_c) + (offset_v * 1000.0)
         v_out_v = v_out_mv / 1000.0
 
-        return {
+        result: Dict[str, Any] = {
             "temperature_c": temperature_c,
             "scale_factor_mv_per_c": scale_factor_mv_per_c,
             "offset_v": offset_v,
             "output_voltage_mv": round(v_out_mv, 4),
             "output_voltage_v": round(v_out_v, 6),
             "formula": "V_out = (T * scale_factor) + offset",
+            "calculation_type": "nominal_transfer_function",
             "status": "success",
         }
 
+        if accuracy_tolerance_c is not None:
+            min_temp = temperature_c - accuracy_tolerance_c
+            max_temp = temperature_c + accuracy_tolerance_c
+            min_mv = (min_temp * scale_factor_mv_per_c) + (offset_v * 1000.0)
+            max_mv = (max_temp * scale_factor_mv_per_c) + (offset_v * 1000.0)
 
-# Module-level convenience alias
+            result.update({
+                "accuracy_tolerance_c": accuracy_tolerance_c,
+                "min_output_voltage_mv": round(min_mv, 4),
+                "max_output_voltage_mv": round(max_mv, 4),
+                "min_output_voltage_v": round(min_mv / 1000.0, 6),
+                "max_output_voltage_v": round(max_mv / 1000.0, 6),
+                "tolerance_band_mv": round(max_mv - min_mv, 4),
+            })
+
+        return result
+
+    @staticmethod
+    def adc_compatibility_check(
+        max_sensor_voltage_v: float,
+        adc_reference_v: float,
+        adc_resolution_bits: Optional[int] = None,
+        scale_factor_mv_per_c: float = 10.0,
+    ) -> Dict[str, Any]:
+        """Deterministically validate sensor output compatibility with ADC interface.
+
+        Evaluates full-scale input headroom, saturation thresholds, quantization steps,
+        temperature resolution per LSB, and analog interface considerations.
+
+        Args:
+            max_sensor_voltage_v: Maximum expected sensor output voltage in Volts (e.g. 1.0V at 100°C).
+            adc_reference_v: ADC reference / full-scale voltage in Volts (e.g. 0.8V or 3.3V).
+            adc_resolution_bits: Optional ADC bit depth (e.g. 10, 12, 16).
+            scale_factor_mv_per_c: Sensor sensitivity in mV/°C (default: 10.0 for LM35).
+
+        Returns:
+            Dictionary containing compatibility status, saturation analysis, resolution metrics,
+            and interface caveats.
+        """
+        for val, name in [
+            (max_sensor_voltage_v, "max_sensor_voltage_v"),
+            (adc_reference_v, "adc_reference_v"),
+        ]:
+            if math.isnan(val) or math.isinf(val):
+                raise ValueError(f"Parameter '{name}' must be finite.")
+
+        if adc_reference_v <= 0:
+            raise ValueError("ADC reference voltage must be strictly positive (> 0V).")
+
+        if max_sensor_voltage_v < 0:
+            raise ValueError("Max sensor voltage cannot be negative.")
+
+        violations: List[str] = []
+        warnings: List[str] = []
+        caveats: List[str] = []
+
+        is_compatible = max_sensor_voltage_v <= adc_reference_v
+        margin_v = round(adc_reference_v - max_sensor_voltage_v, 4)
+
+        # Saturation temperature calculation
+        saturation_temp_c = round((adc_reference_v * 1000.0) / scale_factor_mv_per_c, 2)
+
+        if not is_compatible:
+            violations.append(
+                f"ADC SATURATION VIOLATION: Maximum sensor output ({max_sensor_voltage_v:.3f}V) exceeds "
+                f"ADC reference voltage ({adc_reference_v:.3f}V). Sensor output clips at {saturation_temp_c}°C."
+            )
+        else:
+            utilization_pct = round((max_sensor_voltage_v / adc_reference_v) * 100.0, 2)
+            if utilization_pct < 40.0:
+                warnings.append(
+                    f"Suboptimal dynamic range utilization: Maximum sensor output ({max_sensor_voltage_v:.3f}V) "
+                    f"uses only {utilization_pct}% of ADC full-scale range ({adc_reference_v:.3f}V). "
+                    "Consider scaling with an instrumentation amplifier or reducing Vref."
+                )
+
+        # Quantization and resolution metrics
+        quantization: Optional[Dict[str, Any]] = None
+        if adc_resolution_bits is not None:
+            if adc_resolution_bits <= 0 or adc_resolution_bits > 32:
+                raise ValueError("adc_resolution_bits must be between 1 and 32.")
+
+            total_codes = 2 ** adc_resolution_bits
+            v_lsb_v = adc_reference_v / total_codes
+            v_lsb_mv = v_lsb_v * 1000.0
+            temp_res_c = v_lsb_mv / scale_factor_mv_per_c
+
+            quantization = {
+                "adc_resolution_bits": adc_resolution_bits,
+                "total_codes": total_codes,
+                "v_lsb_v": round(v_lsb_v, 8),
+                "v_lsb_mv": round(v_lsb_mv, 4),
+                "temp_resolution_c_per_count": round(temp_res_c, 4),
+                "formula_lsb": f"V_LSB = V_ref / 2^{adc_resolution_bits}",
+                "formula_temp_res": "T_res = V_LSB / S",
+            }
+
+        # Analog interface considerations & caveats
+        caveats.extend([
+            "Source Impedance & Capacitive Loading: LM35 has very low output impedance (~0.1Ω at 1mA load), "
+            "but capacitive loads greater than 50 pF can cause output ringing or instability. "
+            "Use a series isolation resistor (75Ω to 1kΩ) or an RC damper circuit when connecting to ADC input pins or long cables.",
+            "Acquisition Time & Sampling Capacitance: Ensure ADC sample-and-hold acquisition time allows internal "
+            "sampling capacitor to fully charge through the source/filter impedance before conversion.",
+            "Reference Stability & Noise: ADC conversion precision is directly bounded by Vref noise and drift. "
+            "Decouple Vref with low-ESR ceramic bypass capacitors close to the ADC pins.",
+            "Analog & Digital Ground Separation: Isolate analog sensor return path from high-current digital switching "
+            "ground return paths to prevent ground loop noise from degrading temperature measurements.",
+            "Input Protection: Add clamp diodes or voltage-limiting protection if sensor supply exceeds ADC maximum pin ratings.",
+        ])
+
+        return {
+            "is_compatible": is_compatible,
+            "max_sensor_voltage_v": max_sensor_voltage_v,
+            "max_sensor_output_v": max_sensor_voltage_v,
+            "adc_reference_v": adc_reference_v,
+            "margin_v": margin_v,
+            "saturation_temp_c": saturation_temp_c,
+            "violations": violations,
+            "warnings": warnings,
+            "quantization": quantization,
+            "interface_caveats": caveats,
+            "status": "PASS" if is_compatible else "FAIL",
+        }
+
+    @staticmethod
+    def lm35_variant_temperature_check(
+        variant: str,
+        min_temp_c: Optional[float] = None,
+        max_temp_c: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Validate operational temperature range against official TI LM35 variant limits.
+
+        TI Datasheet Variants:
+        - LM35, LM35A:   -55°C to 150°C
+        - LM35C, LM35CA: -40°C to 110°C
+        - LM35D, LM35DZ:   0°C to 100°C
+
+        Args:
+            variant: Part number or variant string (e.g. 'LM35', 'LM35D', 'LM35A').
+            min_temp_c: User target minimum operating temperature in °C.
+            max_temp_c: User target maximum operating temperature in °C.
+
+        Returns:
+            Dictionary with variant limits, compatibility status, violations, and warnings.
+        """
+        v_upper = variant.strip().upper()
+        # Canonical ranges per TI LM35 datasheet
+        ranges = {
+            "LM35": (-55.0, 150.0),
+            "LM35A": (-55.0, 150.0),
+            "LM35C": (-40.0, 110.0),
+            "LM35CA": (-40.0, 110.0),
+            "LM35D": (0.0, 100.0),
+            "LM35DZ": (0.0, 100.0),
+        }
+
+        matched_variant = None
+        for k in sorted(ranges.keys(), key=len, reverse=True):
+            if k in v_upper:
+                matched_variant = k
+                break
+
+        if not matched_variant:
+            # Default to generic family
+            matched_variant = "LM35"
+
+        rated_min, rated_max = ranges[matched_variant]
+        is_generic_family = (v_upper in ("LM35", "LM-35") or matched_variant == "LM35" and not any(s in v_upper for s in ("35A", "35C", "35CA", "35D", "35DZ")))
+
+        violations: List[str] = []
+        warnings: List[str] = []
+        is_compatible = True
+
+        if is_generic_family:
+            warnings.append(
+                "GENERIC PART NUMBER UNCERTAINTY: Query specified generic 'LM35' without suffix. "
+                "While military/industrial LM35/LM35A covers -55°C to 150°C, commercial grade LM35D/LM35DZ "
+                "is strictly limited to 0°C to 100°C. Verify actual orderable part number."
+            )
+
+        if min_temp_c is not None:
+            if min_temp_c < rated_min:
+                is_compatible = False
+                violations.append(
+                    f"TEMPERATURE UNDERFLOW: Target minimum temperature ({min_temp_c}°C) is below "
+                    f"rated minimum limit ({rated_min}°C) for variant {matched_variant}."
+                )
+
+        if max_temp_c is not None:
+            if max_temp_c > rated_max:
+                is_compatible = False
+                violations.append(
+                    f"TEMPERATURE OVERFLOW: Target maximum temperature ({max_temp_c}°C) exceeds "
+                    f"rated maximum limit ({rated_max}°C) for variant {matched_variant}."
+                )
+
+        return {
+            "variant": matched_variant,
+            "rated_min_c": rated_min,
+            "rated_max_c": rated_max,
+            "is_compatible": is_compatible,
+            "is_generic_family": is_generic_family,
+            "violations": violations,
+            "warnings": warnings,
+            "status": "PASS" if is_compatible else "FAIL",
+        }
+
+
+# Module-level convenience aliases
 sensor_transfer_output = ElectricalCalculator.sensor_transfer_output
+adc_compatibility_check = ElectricalCalculator.adc_compatibility_check
+lm35_variant_temperature_check = ElectricalCalculator.lm35_variant_temperature_check
 
 

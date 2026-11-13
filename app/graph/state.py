@@ -18,11 +18,13 @@ class ExtractedRequirements(BaseModel):
     """Structured engineering design requirements extracted from user query."""
 
     target_components: List[str] = Field(default_factory=list, description="Identified component part numbers (e.g., LM35)")
+    component_variant: Optional[str] = Field(default=None, description="Specific component variant part number (e.g. LM35D, LM35A)")
     target_supply_voltage_v: Optional[float] = Field(default=None, description="Operating supply voltage in Volts")
     target_max_current_ma: Optional[float] = Field(default=None, description="Operating/maximum current target in mA")
     min_temp_c: Optional[float] = Field(default=None, description="Minimum operational temperature target in °C")
     max_temp_c: Optional[float] = Field(default=None, description="Maximum operational temperature target in °C")
     adc_reference_voltage_v: Optional[float] = Field(default=None, description="ADC reference or input full-scale voltage in Volts")
+    adc_resolution_bits: Optional[int] = Field(default=None, description="ADC resolution in bits (e.g. 10, 12, 16)")
     load_impedance_ohms: Optional[float] = Field(default=None, description="Load resistance or impedance in Ohms")
     identified_requirements: Dict[str, Any] = Field(default_factory=dict, description="Key-value dictionary of stated requirements")
     missing_requirements: List[str] = Field(default_factory=list, description="Explicitly identified unstated engineering parameters")
@@ -34,12 +36,20 @@ class ComponentSpecification(BaseModel):
     parameter: str = Field(description="Parameter name (e.g. Recommended Supply Voltage)")
     value: Any = Field(description="Parameter value or range (e.g. 4V to 30V)")
     unit: Optional[str] = Field(default=None, description="Physical unit (e.g. V, mA, mV/°C)")
+    category: Optional[str] = Field(
+        default=None,
+        description="Standard specification category: Recommended Operating Conditions, Absolute Maximum Ratings, "
+                    "Electrical Characteristics, Typical Characteristics, Guaranteed or tested limits, Design limits, Application guidance"
+    )
     status: str = Field(default="typical", description="Specification status: typical, minimum, maximum, guaranteed, recommended_operating, absolute_maximum")
+    min_val: Optional[float] = Field(default=None, description="Minimum numeric limit value")
+    max_val: Optional[float] = Field(default=None, description="Maximum numeric limit value")
     conditions: Optional[str] = Field(default=None, description="Applicable operating temperature and voltage conditions")
     variant: Optional[str] = Field(default=None, description="Applicable component variant (e.g. LM35, LM35A)")
     source: str = Field(description="Datasheet source filename")
     page: Any = Field(description="Page number in source datasheet")
     citation: Optional[str] = Field(default=None, description="Formatted citation string e.g. [lm35.pdf, p. 1]")
+    evidence_text: Optional[str] = Field(default=None, description="Verbatim text excerpt from source datasheet passage")
     notes: Optional[str] = Field(default=None, description="Additional conditions or limits")
 
 
@@ -47,6 +57,8 @@ class ComponentInformation(BaseModel):
     """Extracted component specifications and missing parameters."""
 
     part_number: str = Field(description="Component identifier")
+    specific_variant: Optional[str] = Field(default=None, description="Specific component variant (e.g. LM35D, LM35A)")
+    variant_uncertainty: Optional[str] = Field(default=None, description="Uncertainty notice if generic family was specified")
     verified_specs: Dict[str, Any] = Field(default_factory=dict, description="Verified datasheet specifications")
     unverified_or_missing_specs: List[str] = Field(default_factory=list, description="Specifications not found in datasheet evidence")
     citations: List[Dict[str, Any]] = Field(default_factory=list, description="Source datasheet citations")

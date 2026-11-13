@@ -210,6 +210,19 @@ def test_analyze_endpoint_empty_query_validation(client: TestClient) -> None:
     assert response.status_code == 422
 
 
+def test_analyze_workflow_error_sanitization(client: TestClient) -> None:
+    """Verify that when copilot workflow raises an exception with secret keys, secrets are redacted in API response."""
+    fake_key = "AQ." + ("x" * 40)
+    with patch("app.api.routes.run_copilot_workflow", side_effect=RuntimeError(f"Backend failed for key={fake_key}")):
+        response = client.post("/api/v1/analyze", json={"query": "Design an LM35 sensor circuit"})
+
+        assert response.status_code == 500
+        error_detail = response.json().get("detail", "")
+        assert fake_key not in error_detail
+        assert "REDACTED" in error_detail
+        assert "Copilot workflow execution failed" in error_detail
+
+
 # ==============================================================================
 # 4. CORS Middleware Tests
 # ==============================================================================

@@ -32,6 +32,7 @@ from app.api.schemas import (
 )
 from app.config import get_settings
 from app.graph.workflow import run_copilot_workflow
+from app.rag.answer_generator import sanitize_error_message
 from app.rag.retrieval import DatasheetRetriever, get_retriever
 
 logger = logging.getLogger(__name__)
@@ -278,8 +279,9 @@ def analyze_circuit_query(request: AnalyzeRequest) -> AnalyzeResponse:
     except HTTPException:
         raise
     except Exception as exc:
-        logger.error("Workflow execution failed in analyze endpoint: %s", exc)
+        sanitized_detail = sanitize_error_message(str(exc))
+        logger.error("Workflow execution failed in analyze endpoint: %s", sanitized_detail)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Copilot workflow execution failed: {exc}",
+            detail=f"Copilot workflow execution failed: {sanitized_detail}",
         ) from exc

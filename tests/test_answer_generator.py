@@ -20,11 +20,15 @@ from google.genai import errors
 from langchain_core.documents import Document
 
 from app.rag.answer_generator import (
+    GeminiErrorKind,
+    GeminiGenerationError,
     GroundedAnswerGenerator,
     GroundedAnswerResult,
     SourceCitation,
+    classify_gemini_error,
     format_context_for_prompt,
     generate_grounded_answer,
+    sanitize_error_message,
 )
 
 
@@ -461,3 +465,160 @@ def test_strategy_routing(
 
     generator.generate_answer("Test Semantic", strategy="semantic")
     mock_retriever.retrieve_semantic.assert_called_once()
+
+
+# ==============================================================================
+# 9. Extended Reliability, Error Classification & Secret Sanitization Tests
+# ==============================================================================
+def test_401_unauthenticated_without_retry(
+    mock_retriever: MagicMock,
+) -> None:
+    """Verify that HTTP 401 (invalid/missing credentials) fails immediately on attempt 1 without retry."""
+    client = MagicMock()
+    client.models.generate_content.side_effect = errors.APIError(
+        code=401,
+        response_json={"error": {"message": "Request had invalid authentication credentials."}},
+    )
+
+    generator = GroundedAnswerGenerator(
+        retriever=mock_retriever,
+        gemini_client=client,
+        max_retries=3,
+    )
+
+    with patch("time.sleep") as mock_sleep:
+        with pytest.raises(RuntimeError, match="Gemini API call failed \\(HTTP 401\\)"):
+            generator.generate_answer("What is the supply voltage?")
+
+        assert client.models.generate_content.call_count == 1
+        assert mock_sleep.call_count == 0
+
+
+def test_retry_after_header_handling(
+    mock_retriever: MagicMock,
+) -> None:
+    """Verify that Retry-After header in 429 response is extracted and respected during backoff sleep."""
+    client = MagicMock()
+    success_resp = MagicMock()
+    success_resp.text = "Grounded response after rate limit backoff."
+
+    mock_http_response = MagicMock()
+    mock_http_response.headers = {"retry-after": "3.5"}
+
+    api_err = errors.APIError(
+        code=429,
+        response_json={"error": {"message": "Resource Exhausted"}},
+        response=mock_http_response,
+    )
+    client.models.generate_content.side_effect = [api_err, success_resp]
+
+    generator = GroundedAnswerGenerator(
+        retriever=mock_retriever,
+        gemini_client=client,
+        max_retries=3,
+        initial_backoff=1.0,
+    )
+
+    with patch("time.sleep") as mock_sleep:
+        result = generator.generate_answer("What is the operating voltage?")
+        assert result.answer == "Grounded response after rate limit backoff."
+        assert client.models.generate_content.call_count == 2
+        assert mock_sleep.call_count == 1
+
+        # Sleep time must respect Retry-After (3.5) + jitter in [0.1, 0.5] -> 3.6 <= sleep_time <= 4.0
+        sleep_arg = mock_sleep.call_args[0][0]
+        assert 3.5 <= sleep_arg <= 4.1
+
+
+def test_retrieval_evidence_preserved_in_exception_on_failure(
+    mock_retriever: MagicMock,
+) -> None:
+    """Verify that when generation fails after retries, the raised GeminiGenerationError preserves retrieved chunks."""
+    client = MagicMock()
+    client.models.generate_content.side_effect = errors.APIError(
+        code=503,
+        response_json={"error": {"message": "Service Unavailable - High load"}},
+    )
+
+    generator = GroundedAnswerGenerator(
+        retriever=mock_retriever,
+        gemini_client=client,
+        max_retries=3,
+    )
+
+    with patch("time.sleep"):
+        with pytest.raises(GeminiGenerationError) as exc_info:
+            generator.generate_answer("What is the operating voltage?", raise_on_error=True)
+
+        err = exc_info.value
+        assert isinstance(err, RuntimeError)
+        assert len(err.retrieved_chunks) == 2
+        assert err.retrieved_chunks[0]["source"] == "lm35.pdf"
+        assert len(err.sources) == 2
+        assert err.error_kind == GeminiErrorKind.TRANSIENT_SERVER
+        assert err.status_code == 503
+
+
+def test_retrieval_evidence_preserved_when_raise_on_error_false(
+    mock_retriever: MagicMock,
+) -> None:
+    """Verify that with raise_on_error=False, generation failure returns result with preserved chunks and clear error."""
+    client = MagicMock()
+    client.models.generate_content.side_effect = errors.APIError(
+        code=503,
+        response_json={"error": {"message": "Service Unavailable"}},
+    )
+
+    generator = GroundedAnswerGenerator(
+        retriever=mock_retriever,
+        gemini_client=client,
+        max_retries=2,
+    )
+
+    with patch("time.sleep"):
+        result = generator.generate_answer("What is the pinout?", raise_on_error=False)
+
+        assert isinstance(result, GroundedAnswerResult)
+        assert result.generation_success is False
+        assert result.error is not None
+        assert "Service is currently unavailable after 2 attempts" in result.error
+        assert "Answer generation failed: Service remained unavailable after 2 attempts" in result.answer
+        assert len(result.retrieved_chunks) == 2
+        assert len(result.sources) == 2
+        assert result.has_sufficient_context is False
+
+
+def test_secret_sanitization_in_error_messages() -> None:
+    """Verify that sensitive API keys and tokens are redacted from error text, logs, and exception messages."""
+    fake_secret = "AQ." + ("x" * 40)
+    raw_error_text = f"API call failed for key={fake_secret} with Bearer token_secret_12345678"
+
+    sanitized = sanitize_error_message(raw_error_text)
+    assert fake_secret not in sanitized
+    assert "token_secret_12345678" not in sanitized
+    assert "REDACTED" in sanitized
+    assert "Bearer [REDACTED]" in sanitized
+
+
+def test_sensible_timeout_configuration(
+    mock_retriever: MagicMock,
+) -> None:
+    """Verify that custom timeout is accepted and configured on HttpOptions."""
+    client = MagicMock()
+    success_resp = MagicMock()
+    success_resp.text = "Answer with timeout."
+    client.models.generate_content.return_value = success_resp
+
+    generator = GroundedAnswerGenerator(
+        retriever=mock_retriever,
+        gemini_client=client,
+        timeout=15.0,
+    )
+
+    assert generator.timeout == 15.0
+    generator.generate_answer("Query with 15s timeout")
+
+    # Check generate_content was called with config containing 15000ms timeout
+    call_kwargs = client.models.generate_content.call_args[1]
+    config_passed = call_kwargs["config"]
+    assert config_passed.http_options.timeout == 15000

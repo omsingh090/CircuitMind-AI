@@ -69,6 +69,12 @@ class ValidationAgent:
                     v_details = dict(v_check)
                     v_details["min_recommended_v"] = v_min
                     v_details["max_recommended_v"] = v_max
+                    v_details["datasheet_page"] = supply_spec.get("page", 4)
+                    v_details["extracted_specification"] = f"Recommended Operating Supply: {v_min}V to {v_max}V"
+                    v_details["user_constraint"] = f"Target Supply Voltage: {target_voltage}V"
+                    v_details["calculation"] = f"Headroom: {v_check.get('headroom_v', 0.0)}V"
+                    v_details["comparison_result"] = "PASS" if v_check["is_compatible"] else "FAIL"
+
                     checks.append({
                         "check_name": "Operating Supply Voltage Compatibility",
                         "status": "PASS" if v_check["is_compatible"] else "FAIL",
@@ -92,10 +98,45 @@ class ValidationAgent:
         else:
             warnings.append("Design requirement did not specify a target supply voltage for validation.")
 
-        # Check 2: Quiescent Power Dissipation Calculation
+        # Check 2: LM35 Variant Operational Temperature Range Check
+        variant_name = requirements.get("component_variant") or component_info.get("specific_variant") or "LM35"
+        t_min = requirements.get("min_temp_c")
+        t_max = requirements.get("max_temp_c")
+
+        if t_min is not None or t_max is not None:
+            t_check = self.calc.lm35_variant_temperature_check(
+                variant=variant_name,
+                min_temp_c=t_min,
+                max_temp_c=t_max,
+            )
+            t_details = dict(t_check)
+            t_details["datasheet_page"] = 4
+            t_details["extracted_specification"] = (
+                f"Rated Operating Range for {t_check['variant']}: {t_check['rated_min_c']}°C to {t_check['rated_max_c']}°C"
+            )
+            t_details["user_constraint"] = f"Target Operating Span: {t_min}°C to {t_max}°C"
+            t_details["calculation"] = (
+                f"Operating Range Margin: Low {(t_min - t_check['rated_min_c']) if t_min is not None else 'N/A'}°C, "
+                f"High {(t_check['rated_max_c'] - t_max) if t_max is not None else 'N/A'}°C"
+            )
+            t_details["comparison_result"] = t_check["status"]
+
+            checks.append({
+                "check_name": f"Operating Temperature Range ({t_check['variant']})",
+                "status": t_check["status"],
+                "details": t_details,
+            })
+
+            if not t_check["is_compatible"]:
+                all_checks_passed = False
+                violations.extend(t_check["violations"])
+
+            warnings.extend(t_check["warnings"])
+
+        # Check 3: Quiescent Power Dissipation Calculation
         quiescent_spec = verified_specs.get("quiescent_current")
         if target_voltage is not None and quiescent_spec:
-            i_ma = quiescent_spec.get("value_ma", 0.131)
+            i_ma = quiescent_spec.get("value_ma", 0.056)
             i_a = i_ma / 1000.0
             try:
                 p_calc = self.calc.power_dissipation(voltage=target_voltage, current=i_a)
@@ -108,16 +149,21 @@ class ValidationAgent:
                         "formula": p_calc["formula"],
                         "current_ma": i_ma,
                         "voltage_v": target_voltage,
+                        "datasheet_page": quiescent_spec.get("page", 7),
+                        "extracted_specification": f"Typical Quiescent Current: {i_ma * 1000.0:.0f} µA (25°C, 5V)",
+                        "user_constraint": f"Supply Voltage: {target_voltage}V",
+                        "calculation": f"P = {target_voltage}V * {i_ma}mA = {p_calc['power_mw']}mW",
+                        "comparison_result": "PASS",
                     },
                 })
             except Exception as exc:
                 logger.error("Power dissipation calculation error: %s", exc)
                 warnings.append(f"Could not calculate quiescent power: {exc}")
 
-        # Check 3: Current Requirement Compatibility
+        # Check 4: Current Requirement Compatibility
         target_current_ma = requirements.get("target_max_current_ma")
         if target_current_ma is not None and quiescent_spec:
-            iq_ma = quiescent_spec.get("value_ma", 0.06)
+            iq_ma = quiescent_spec.get("value_ma", 0.056)
             if target_current_ma < iq_ma:
                 all_checks_passed = False
                 violations.append(
@@ -127,7 +173,15 @@ class ValidationAgent:
                 checks.append({
                     "check_name": "Current Budget Feasibility",
                     "status": "FAIL",
-                    "details": {"target_current_ma": target_current_ma, "quiescent_current_ma": iq_ma},
+                    "details": {
+                        "target_current_ma": target_current_ma,
+                        "quiescent_current_ma": iq_ma,
+                        "datasheet_page": quiescent_spec.get("page", 7),
+                        "extracted_specification": f"Quiescent Current: {iq_ma}mA",
+                        "user_constraint": f"Target Current Budget: {target_current_ma}mA",
+                        "calculation": f"Budget Deficit: {target_current_ma - iq_ma}mA",
+                        "comparison_result": "FAIL",
+                    },
                 })
             else:
                 headroom_ma = target_current_ma - iq_ma
@@ -138,84 +192,119 @@ class ValidationAgent:
                         "target_current_ma": target_current_ma,
                         "quiescent_current_ma": iq_ma,
                         "headroom_ma": round(headroom_ma, 4),
+                        "datasheet_page": quiescent_spec.get("page", 7),
+                        "extracted_specification": f"Quiescent Current: {iq_ma}mA",
+                        "user_constraint": f"Target Current Budget: {target_current_ma}mA",
+                        "calculation": f"Budget Headroom: {round(headroom_ma, 4)}mA",
+                        "comparison_result": "PASS",
                     },
                 })
 
-        # Check 4: Deterministic Sensor Transfer Function Calculations (e.g. 25°C and 100°C output)
+        # Check 5: Deterministic Sensor Transfer Function Calculations (0°C, 25°C, 100°C)
         scale_spec = verified_specs.get("scale_factor")
         scale_val = scale_spec.get("value", 10.0) if scale_spec else 10.0
+        acc_spec = verified_specs.get("accuracy_tolerance")
+        acc_val = acc_spec.get("value_c") if acc_spec else None
 
-        # Always deterministically calculate 25°C output (datasheet room temperature standard)
-        calc_25c = self.calc.sensor_transfer_output(temperature_c=25.0, scale_factor_mv_per_c=scale_val)
+        # Always calculate 0°C, 25°C, and 100°C outputs
+        calc_0c = self.calc.sensor_transfer_output(
+            temperature_c=0.0,
+            scale_factor_mv_per_c=scale_val,
+            accuracy_tolerance_c=acc_val,
+        )
+        calculations["output_at_0c"] = calc_0c
+
+        calc_25c = self.calc.sensor_transfer_output(
+            temperature_c=25.0,
+            scale_factor_mv_per_c=scale_val,
+            accuracy_tolerance_c=acc_val,
+        )
         calculations["output_at_25c"] = calc_25c
 
-        # Deterministically calculate 100°C output (standard full-scale benchmark)
-        calc_100c = self.calc.sensor_transfer_output(temperature_c=100.0, scale_factor_mv_per_c=scale_val)
+        calc_100c = self.calc.sensor_transfer_output(
+            temperature_c=100.0,
+            scale_factor_mv_per_c=scale_val,
+            accuracy_tolerance_c=acc_val,
+        )
         calculations["output_at_100c"] = calc_100c
 
         # Optional user min temperature transfer output
-        t_min = requirements.get("min_temp_c")
-        if t_min is not None and t_min not in (25.0, 100.0):
+        if t_min is not None and t_min not in (0.0, 25.0, 100.0):
             calculations[f"output_at_{int(t_min)}c"] = self.calc.sensor_transfer_output(
-                temperature_c=t_min, scale_factor_mv_per_c=scale_val
+                temperature_c=t_min,
+                scale_factor_mv_per_c=scale_val,
+                accuracy_tolerance_c=acc_val,
             )
 
         # Optional user max temperature transfer output
-        t_max = requirements.get("max_temp_c")
-        if t_max is not None and t_max not in (25.0, 100.0):
+        if t_max is not None and t_max not in (0.0, 25.0, 100.0):
             calculations[f"output_at_{int(t_max)}c"] = self.calc.sensor_transfer_output(
-                temperature_c=t_max, scale_factor_mv_per_c=scale_val
+                temperature_c=t_max,
+                scale_factor_mv_per_c=scale_val,
+                accuracy_tolerance_c=acc_val,
             )
 
-        # Determine full-scale sensor output voltage for interface validation
+        # Full-scale sensor output voltage for interface validation
         v_out_full_scale_v = calc_100c["output_voltage_v"]
         if t_max is not None and t_max > 100.0:
-            calc_tmax = self.calc.sensor_transfer_output(temperature_c=t_max, scale_factor_mv_per_c=scale_val)
+            calc_tmax = self.calc.sensor_transfer_output(
+                temperature_c=t_max,
+                scale_factor_mv_per_c=scale_val,
+                accuracy_tolerance_c=acc_val,
+            )
             v_out_full_scale_v = calc_tmax["output_voltage_v"]
 
-        # Check 5 & 6: ADC Interface & Output Load Feasibility
-        # Evaluated when primary circuit checks are active or interface parameters are provided
+        # Check 6 & 7: ADC Interface & Output Load Feasibility
         has_supply_check = any(c.get("check_name") == "Operating Supply Voltage Compatibility" for c in checks)
         adc_ref_v = requirements.get("adc_reference_voltage_v")
+        adc_bits = requirements.get("adc_resolution_bits")
         load_r_ohms = requirements.get("load_impedance_ohms")
 
         if has_supply_check or adc_ref_v is not None or load_r_ohms is not None:
-            # Check 5: ADC Interface & Signal Headroom Check
+            # Check 6: ADC Interface & Signal Headroom Check
             if adc_ref_v is not None:
-                if v_out_full_scale_v > adc_ref_v:
+                adc_eval = self.calc.adc_compatibility_check(
+                    max_sensor_voltage_v=v_out_full_scale_v,
+                    adc_reference_v=adc_ref_v,
+                    adc_resolution_bits=adc_bits,
+                    scale_factor_mv_per_c=scale_val,
+                )
+                adc_details = dict(adc_eval)
+                adc_details["datasheet_page"] = 1
+                adc_details["extracted_specification"] = f"Scale Factor: {scale_val} mV/°C (Max Sensor Output: {v_out_full_scale_v}V)"
+                adc_details["user_constraint"] = f"ADC Reference: {adc_ref_v}V" + (f", {adc_bits}-bit" if adc_bits else "")
+                adc_details["calculation"] = (
+                    f"Headroom: {adc_eval['margin_v']}V" if adc_eval["is_compatible"]
+                    else f"Saturation at {adc_eval['saturation_temp_c']}°C (Deficit: {abs(adc_eval['margin_v'])}V)"
+                )
+                adc_details["comparison_result"] = adc_eval["status"]
+
+                checks.append({
+                    "check_name": "ADC Interface & Signal Headroom",
+                    "status": adc_eval["status"],
+                    "details": adc_details,
+                })
+
+                if not adc_eval["is_compatible"]:
                     all_checks_passed = False
-                    violations.append(
-                        f"ADC SATURATION VIOLATION: Maximum sensor output voltage ({v_out_full_scale_v}V) "
-                        f"exceeds ADC reference/full-scale range ({adc_ref_v}V). Signal will clip at high temperatures."
-                    )
-                    checks.append({
-                        "check_name": "ADC Interface & Signal Headroom",
-                        "status": "FAIL",
-                        "details": {
-                            "max_sensor_output_v": v_out_full_scale_v,
-                            "adc_reference_v": adc_ref_v,
-                        },
-                    })
-                else:
-                    checks.append({
-                        "check_name": "ADC Interface & Signal Headroom",
-                        "status": "PASS",
-                        "details": {
-                            "max_sensor_output_v": v_out_full_scale_v,
-                            "adc_reference_v": adc_ref_v,
-                            "signal_margin_v": round(adc_ref_v - v_out_full_scale_v, 4),
-                        },
-                    })
+                    violations.extend(adc_eval["violations"])
+
+                warnings.extend(adc_eval["warnings"])
             else:
                 checks.append({
                     "check_name": "ADC Interface & Signal Headroom",
                     "status": "UNVERIFIED",
                     "details": {
-                        "reason": "ADC reference voltage / input range not specified by design requirements."
+                        "reason": "ADC reference voltage / input range not specified by design requirements.",
+                        "datasheet_page": 1,
+                        "extracted_specification": f"Scale Factor: {scale_val} mV/°C",
+                        "user_constraint": "Unspecified ADC Reference",
+                        "calculation": "None",
+                        "comparison_result": "UNVERIFIED",
                     },
                 })
 
-            # Check 6: Output Load Impedance & Drive Current Check
+            # Check 7: Output Load Impedance & Drive Current Check
             if load_r_ohms is not None:
                 if load_r_ohms <= 0:
                     all_checks_passed = False
@@ -223,12 +312,17 @@ class ValidationAgent:
                     checks.append({
                         "check_name": "Output Load Impedance Feasibility",
                         "status": "FAIL",
-                        "details": {"load_impedance_ohms": load_r_ohms},
+                        "details": {
+                            "load_impedance_ohms": load_r_ohms,
+                            "datasheet_page": 4,
+                            "extracted_specification": "Maximum Output Sourcing Current: 10 mA",
+                            "user_constraint": f"Load Impedance: {load_r_ohms}Ω",
+                            "calculation": "Negative or Zero Resistance",
+                            "comparison_result": "FAIL",
+                        },
                     })
                 else:
-                    # Max load current I = V_out_max / R_load
                     i_load_ma = (v_out_full_scale_v / load_r_ohms) * 1000.0
-                    # LM35 max output sourcing current rating is 10 mA
                     max_rated_load_ma = 10.0
                     if i_load_ma > max_rated_load_ma:
                         all_checks_passed = False
@@ -243,6 +337,11 @@ class ValidationAgent:
                                 "load_impedance_ohms": load_r_ohms,
                                 "load_current_ma": round(i_load_ma, 4),
                                 "max_rated_load_ma": max_rated_load_ma,
+                                "datasheet_page": 4,
+                                "extracted_specification": f"Maximum Output Sourcing Current: {max_rated_load_ma} mA",
+                                "user_constraint": f"Load Impedance: {load_r_ohms}Ω",
+                                "calculation": f"I_load = {v_out_full_scale_v}V / {load_r_ohms}Ω = {round(i_load_ma, 4)}mA",
+                                "comparison_result": "FAIL",
                             },
                         })
                     else:
@@ -253,6 +352,11 @@ class ValidationAgent:
                                 "load_impedance_ohms": load_r_ohms,
                                 "load_current_ma": round(i_load_ma, 4),
                                 "max_rated_load_ma": max_rated_load_ma,
+                                "datasheet_page": 4,
+                                "extracted_specification": f"Maximum Output Sourcing Current: {max_rated_load_ma} mA",
+                                "user_constraint": f"Load Impedance: {load_r_ohms}Ω",
+                                "calculation": f"I_load = {v_out_full_scale_v}V / {load_r_ohms}Ω = {round(i_load_ma, 4)}mA",
+                                "comparison_result": "PASS",
                             },
                         })
             else:
@@ -260,7 +364,12 @@ class ValidationAgent:
                     "check_name": "Output Load Impedance Feasibility",
                     "status": "UNVERIFIED",
                     "details": {
-                        "reason": "Load impedance / resistance not specified by design requirements."
+                        "reason": "Load impedance / resistance not specified by design requirements.",
+                        "datasheet_page": 4,
+                        "extracted_specification": "Maximum Output Sourcing Current: 10 mA",
+                        "user_constraint": "Unspecified Load Impedance",
+                        "calculation": "None",
+                        "comparison_result": "UNVERIFIED",
                     },
                 })
 

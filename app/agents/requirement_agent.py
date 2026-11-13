@@ -57,8 +57,28 @@ class RequirementAgent:
         found_parts = [p.upper() for p in part_pattern.findall(query) if len(p) >= 3]
         target_components = list(dict.fromkeys(found_parts))  # preserve order & unique
 
+        # Identify specific variant if provided (e.g. LM35D, LM35A, LM35C, LM35CA, LM35DZ)
+        component_variant: Optional[str] = None
+        for comp in target_components:
+            for v_name in ["LM35DZ", "LM35CA", "LM35D", "LM35C", "LM35A"]:
+                if comp.upper().startswith(v_name) or comp.upper() == v_name:
+                    component_variant = v_name
+                    break
+            if component_variant:
+                break
+
+        # Fallback check for hyphenated or styled variant strings (e.g., LM35-D, LM-35D, LM35D)
+        if not component_variant:
+            v_match = re.search(r"\bLM-?35-?(DZ|CA|[ACD])\b", query, re.IGNORECASE)
+            if v_match:
+                component_variant = f"LM35{v_match.group(1).upper()}"
+            elif any("LM35" in c.upper() for c in target_components) or re.search(r"\bLM-?35\b", query, re.IGNORECASE):
+                component_variant = "LM35"
+
         if target_components:
             identified["target_components"] = target_components
+            if component_variant:
+                identified["component_variant"] = component_variant
         else:
             missing.append("Specific component part number not specified")
 
@@ -87,6 +107,19 @@ class RequirementAgent:
                 pass
         else:
             missing.append("ADC reference voltage / input voltage range not specified")
+
+        # ADC Resolution (e.g., "12-bit ADC", "10-bit", "16 bits", "12-bit resolution")
+        p_res = re.compile(r"\b(\d{1,2})\s*-?\s*bits?\b(?:\s+(?:adc|resolution))?", re.IGNORECASE)
+        res_match = p_res.search(query)
+        adc_bits: Optional[int] = None
+        if res_match:
+            try:
+                val = int(res_match.group(1))
+                if 1 <= val <= 32:
+                    adc_bits = val
+                    identified["adc_resolution_bits"] = adc_bits
+            except ValueError:
+                pass
 
         # 3. Supply voltage extraction (e.g., "Sensor supply: 5V", "5V supply", "Vcc = 5V", "5V circuit")
         # First check explicit supply keywords to prevent colliding with ADC reference voltages
@@ -143,9 +176,10 @@ class RequirementAgent:
         else:
             missing.append("Operating current / load consumption not specified")
 
-        # 4. Temperature range extraction (e.g. -40 to 125 C, 0C to 70C)
+        # 4. Temperature range extraction (e.g. -40 to 125 C, 0C to 70C, 0–125°C)
+        # Supports Unicode en-dash (–), em-dash (—), minus sign (−), ASCII hyphen (-), and 'to'
         temp_pattern = re.compile(
-            r"(-?\d+(?:\.\d+)?)\s*(?:°?c)?\s*(?:to|-)\s*(-?\d+(?:\.\d+)?)\s*°?c",
+            r"(?:from\s+)?([−–\-+]?\d+(?:\.\d+)?)\s*(?:°\s*c|deg(?:rees?)?\s*c|°|c)?\s*(?:to|[−–—\-])\s*([−–\-+]?\d+(?:\.\d+)?)\s*(?:°\s*c|deg(?:rees?)?\s*c|°|c)\b",
             re.IGNORECASE,
         )
         temp_match = temp_pattern.search(query)
@@ -153,8 +187,10 @@ class RequirementAgent:
         max_temp: Optional[float] = None
         if temp_match:
             try:
-                min_temp = float(temp_match.group(1))
-                max_temp = float(temp_match.group(2))
+                min_str = temp_match.group(1).replace("−", "-").replace("–", "-")
+                max_str = temp_match.group(2).replace("−", "-").replace("–", "-")
+                min_temp = float(min_str)
+                max_temp = float(max_str)
                 identified["min_temp_c"] = min_temp
                 identified["max_temp_c"] = max_temp
             except ValueError:
@@ -188,11 +224,13 @@ class RequirementAgent:
 
         return ExtractedRequirements(
             target_components=target_components,
+            component_variant=component_variant,
             target_supply_voltage_v=target_voltage,
             target_max_current_ma=target_current_ma,
             min_temp_c=min_temp,
             max_temp_c=max_temp,
             adc_reference_voltage_v=adc_ref_v,
+            adc_resolution_bits=adc_bits,
             load_impedance_ohms=load_ohms,
             identified_requirements=identified,
             missing_requirements=missing,

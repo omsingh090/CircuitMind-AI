@@ -31,7 +31,21 @@ def profile_node(node_name: str, node_func: Callable[[CircuitMindState], Dict[st
     """Wrap a node function to measure execution duration and persist in node_execution_times."""
     def wrapper(state: CircuitMindState) -> Dict[str, Any]:
         start = time.perf_counter()
-        result = node_func(state)
+        try:
+            result = node_func(state)
+        except Exception as exc:
+            from app.rag.answer_generator import sanitize_error_message
+            sanitized_err = sanitize_error_message(str(exc))
+            logger.error("Node execution error in '%s': %s", node_name, sanitized_err)
+            elapsed_ms = round((time.perf_counter() - start) * 1000.0, 2)
+            timings = dict(state.get("node_execution_times") or {})
+            timings[node_name] = elapsed_ms
+            errors_list = list(state.get("errors") or [])
+            errors_list.append(f"{node_name} failure: {sanitized_err}")
+            return {
+                "node_execution_times": timings,
+                "errors": errors_list,
+            }
         elapsed_ms = round((time.perf_counter() - start) * 1000.0, 2)
         timings = dict(state.get("node_execution_times") or {})
         timings[node_name] = elapsed_ms

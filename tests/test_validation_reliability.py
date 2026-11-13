@@ -468,3 +468,301 @@ class TestValidationReliability:
         assert val_res.status == "INVALID"
         assert val_res.is_valid is False
 
+    def test_specification_categories_and_evidence_preservation(self) -> None:
+        """Verify ComponentAgent populates standardized categories and evidence text."""
+        docs = [
+            {
+                "source": "lm35.pdf",
+                "page": 4,
+                "content": "Recommended Operating Conditions: Operating supply voltage range: 4 V to 30 V. Specified operating temperature: LM35D 0°C to 100°C.",
+            },
+            {
+                "source": "lm35.pdf",
+                "page": 4,
+                "content": "Absolute Maximum Ratings: Supply voltage: -0.2 V to 35 V. Output voltage: -1 V to 6 V.",
+            },
+            {
+                "source": "lm35.pdf",
+                "page": 7,
+                "content": "Quiescent current VS = 5V, TA = 25°C is 56 µA typical, tested limit 67 µA.",
+            },
+            {
+                "source": "lm35.pdf",
+                "page": 1,
+                "content": "Scale factor: 10 mV/°C linear sensitivity. Non-linearity only ±¼°C typical.",
+            },
+        ]
+        agent = ComponentAgent()
+        comp_info = agent.extract_from_documents(docs, target_component="LM35D")
+
+        specs = comp_info.verified_specs
+        assert "supply_voltage_recommended" in specs
+        assert specs["supply_voltage_recommended"]["category"] == "Recommended Operating Conditions"
+        assert specs["supply_voltage_recommended"]["evidence_text"] is not None
+        assert specs["supply_voltage_recommended"]["page"] == 4
+
+        assert "supply_voltage_abs_max" in specs
+        assert specs["supply_voltage_abs_max"]["category"] == "Absolute Maximum Ratings"
+        assert specs["supply_voltage_abs_max"]["evidence_text"] is not None
+
+        assert "quiescent_current" in specs
+        assert specs["quiescent_current"]["category"] == "Typical Characteristics"
+        assert specs["quiescent_current"]["status"] == "typical"
+        assert specs["quiescent_current"]["evidence_text"] is not None
+
+        assert "nonlinearity" in specs
+        assert specs["nonlinearity"]["category"] == "Typical Characteristics"
+
+        assert comp_info.specific_variant == "LM35D"
+
+    def test_lm35_variant_validation_temperature_violation(self) -> None:
+        """Verify operating temperature violation on LM35D produces FAIL check and INVALID status."""
+        reqs = {
+            "target_components": ["LM35D"],
+            "component_variant": "LM35D",
+            "target_supply_voltage_v": 5.0,
+            "min_temp_c": 0.0,
+            "max_temp_c": 125.0,  # LM35D is only rated to 100°C!
+            "adc_reference_voltage_v": 3.3,
+            "load_impedance_ohms": 10000.0,
+        }
+        verified_specs = {
+            "supply_voltage_recommended": {"min_v": 4.0, "max_v": 30.0, "page": 4},
+            "quiescent_current": {"value_ma": 0.056, "page": 7},
+            "scale_factor": {"value": 10.0, "page": 1},
+        }
+        val_agent = ValidationAgent()
+        res = val_agent.validate(
+            requirements=reqs,
+            component_info={"part_number": "LM35D", "specific_variant": "LM35D", "verified_specs": verified_specs},
+        )
+
+        assert res.status == "INVALID"
+        assert res.is_valid is False
+        temp_checks = [c for c in res.checks if "Operating Temperature Range" in c["check_name"]]
+        assert len(temp_checks) == 1
+        assert temp_checks[0]["status"] == "FAIL"
+        assert any("TEMPERATURE OVERFLOW" in v for v in res.violations)
+
+    def test_adc_compatibility_3v3_12bit_passes_with_quantization_and_caveats(self) -> None:
+        """Verify compliant ADC configuration produces PASS, 12-bit quantization, and engineering caveats."""
+        reqs = {
+            "target_components": ["LM35"],
+            "target_supply_voltage_v": 5.0,
+            "min_temp_c": 0.0,
+            "max_temp_c": 100.0,
+            "adc_reference_voltage_v": 3.3,
+            "adc_resolution_bits": 12,
+            "load_impedance_ohms": 10000.0,
+        }
+        verified_specs = {
+            "supply_voltage_recommended": {"min_v": 4.0, "max_v": 30.0, "page": 4},
+            "quiescent_current": {"value_ma": 0.056, "page": 7},
+            "scale_factor": {"value": 10.0, "page": 1},
+        }
+        val_agent = ValidationAgent()
+        res = val_agent.validate(
+            requirements=reqs,
+            component_info={"part_number": "LM35", "verified_specs": verified_specs},
+        )
+
+        assert res.status == "VALID"
+        assert res.is_valid is True
+        assert len(res.violations) == 0
+
+        adc_checks = [c for c in res.checks if c["check_name"] == "ADC Interface & Signal Headroom"]
+        assert len(adc_checks) == 1
+        assert adc_checks[0]["status"] == "PASS"
+
+        details = adc_checks[0]["details"]
+        assert details["margin_v"] == 2.3
+        assert "quantization" in details
+        q = details["quantization"]
+        assert q["total_codes"] == 4096
+        assert abs(q["temp_resolution_c_per_count"] - 0.0806) < 0.001
+        assert len(details["interface_caveats"]) >= 4
+
+    def test_missing_adc_reference_yields_unverified_and_inconclusive(self) -> None:
+        """Verify that omitting ADC reference voltage yields UNVERIFIED check and INCONCLUSIVE overall status."""
+        reqs = {
+            "target_components": ["LM35"],
+            "target_supply_voltage_v": 5.0,
+            "min_temp_c": 0.0,
+            "max_temp_c": 100.0,
+            "load_impedance_ohms": 10000.0,
+            # Note: adc_reference_voltage_v is intentionally omitted
+        }
+        verified_specs = {
+            "supply_voltage_recommended": {"min_v": 4.0, "max_v": 30.0, "page": 4},
+            "quiescent_current": {"value_ma": 0.056, "page": 7},
+            "scale_factor": {"value": 10.0, "page": 1},
+        }
+        val_agent = ValidationAgent()
+        res = val_agent.validate(
+            requirements=reqs,
+            component_info={"part_number": "LM35", "verified_specs": verified_specs},
+        )
+
+        assert res.status == "INCONCLUSIVE"
+        assert res.is_valid is False
+        adc_checks = [c for c in res.checks if c["check_name"] == "ADC Interface & Signal Headroom"]
+        assert len(adc_checks) == 1
+        assert adc_checks[0]["status"] == "UNVERIFIED"
+
+    def test_lm35d_0_to_125c_with_unicode_dash_produces_fail_and_invalid(self) -> None:
+        """Verify LM35D with 0–125°C (using en-dash) fails temperature range and marks design INVALID.
+
+        Ensures:
+        1. Temperature range 0–125°C with Unicode en-dash is extracted as min=0.0, max=125.0.
+        2. LM35D is identified as component_variant.
+        3. Operating Temperature Range check status is FAIL.
+        4. Evidence card contains page, user constraint, specified limit, and comparison.
+        5. Overall status is INVALID despite unverified load impedance.
+        """
+        query = "LM35D, 5V, 0–125°C, ADC 3.3V"
+        req_agent = RequirementAgent()
+        extracted = req_agent.extract(query)
+
+        assert extracted.component_variant == "LM35D"
+        assert extracted.min_temp_c == 0.0
+        assert extracted.max_temp_c == 125.0
+        assert extracted.adc_reference_voltage_v == 3.3
+
+        verified_specs = {
+            "supply_voltage_recommended": {"min_v": 4.0, "max_v": 30.0, "page": 4},
+            "scale_factor": {"value": 10.0, "page": 1},
+            "quiescent_current": {"value_ma": 0.056, "page": 7},
+        }
+        val_agent = ValidationAgent()
+        res = val_agent.validate(
+            requirements=extracted.model_dump(),
+            component_info={"part_number": "LM35D", "specific_variant": "LM35D", "verified_specs": verified_specs},
+        )
+
+        assert res.status == "INVALID"
+        assert res.is_valid is False
+        assert any("TEMPERATURE OVERFLOW" in v for v in res.violations)
+        assert any("exceeds rated maximum limit (100.0°C) for variant LM35D" in v for v in res.violations)
+
+        temp_checks = [c for c in res.checks if "Operating Temperature Range" in c["check_name"]]
+        assert len(temp_checks) == 1
+        t_chk = temp_checks[0]
+        assert t_chk["status"] == "FAIL"
+
+        details = t_chk["details"]
+        assert details["datasheet_page"] == 4
+        assert "Rated Operating Range for LM35D: 0.0°C to 100.0°C" in details["extracted_specification"]
+        assert "0.0°C to 125.0°C" in details["user_constraint"]
+        assert "Operating Range Margin: Low 0.0°C, High -25.0°C" in details["calculation"]
+        assert details["comparison_result"] == "FAIL"
+
+    def test_lm35d_0_to_100c_has_no_temperature_violation(self) -> None:
+        """Verify LM35D operated at 0–100°C has no temperature range violation."""
+        query = "LM35D, 5V, 0–100°C, ADC 3.3V, load 10k"
+        req_agent = RequirementAgent()
+        extracted = req_agent.extract(query)
+
+        assert extracted.component_variant == "LM35D"
+        assert extracted.min_temp_c == 0.0
+        assert extracted.max_temp_c == 100.0
+
+        verified_specs = {
+            "supply_voltage_recommended": {"min_v": 4.0, "max_v": 30.0, "page": 4},
+            "scale_factor": {"value": 10.0, "page": 1},
+            "quiescent_current": {"value_ma": 0.056, "page": 7},
+        }
+        val_agent = ValidationAgent()
+        res = val_agent.validate(
+            requirements=extracted.model_dump(),
+            component_info={"part_number": "LM35D", "specific_variant": "LM35D", "verified_specs": verified_specs},
+        )
+
+        temp_checks = [c for c in res.checks if "Operating Temperature Range" in c["check_name"]]
+        assert len(temp_checks) == 1
+        assert temp_checks[0]["status"] == "PASS"
+        assert not any("TEMPERATURE" in v for v in res.violations)
+
+    def test_lm35c_within_range_has_no_temperature_violation(self) -> None:
+        """Verify LM35C operated within its -40°C to 110°C rated range passes without violation."""
+        query = "LM35C, 5V, 0–100°C, ADC 3.3V, load 10k"
+        req_agent = RequirementAgent()
+        extracted = req_agent.extract(query)
+
+        assert extracted.component_variant == "LM35C"
+        assert extracted.min_temp_c == 0.0
+        assert extracted.max_temp_c == 100.0
+
+        verified_specs = {
+            "supply_voltage_recommended": {"min_v": 4.0, "max_v": 30.0, "page": 4},
+            "scale_factor": {"value": 10.0, "page": 1},
+            "quiescent_current": {"value_ma": 0.056, "page": 7},
+        }
+        val_agent = ValidationAgent()
+        res = val_agent.validate(
+            requirements=extracted.model_dump(),
+            component_info={"part_number": "LM35C", "specific_variant": "LM35C", "verified_specs": verified_specs},
+        )
+
+        temp_checks = [c for c in res.checks if "Operating Temperature Range" in c["check_name"]]
+        assert len(temp_checks) == 1
+        assert temp_checks[0]["status"] == "PASS"
+        assert not any("TEMPERATURE" in v for v in res.violations)
+        assert res.status == "VALID"
+
+    def test_lm35_unspecified_variant_handles_uncertainty_explicitly(self) -> None:
+        """Verify generic LM35 at 0–125°C does not fail (rated -55 to 150°C) but warns of LM35D commercial limit."""
+        query = "LM35, 5V, 0–125°C, ADC 3.3V"
+        req_agent = RequirementAgent()
+        extracted = req_agent.extract(query)
+
+        assert extracted.component_variant == "LM35"
+        assert extracted.min_temp_c == 0.0
+        assert extracted.max_temp_c == 125.0
+
+        verified_specs = {
+            "supply_voltage_recommended": {"min_v": 4.0, "max_v": 30.0, "page": 4},
+            "scale_factor": {"value": 10.0, "page": 1},
+            "quiescent_current": {"value_ma": 0.056, "page": 7},
+        }
+        val_agent = ValidationAgent()
+        res = val_agent.validate(
+            requirements=extracted.model_dump(),
+            component_info={"part_number": "LM35", "verified_specs": verified_specs},
+        )
+
+        temp_checks = [c for c in res.checks if "Operating Temperature Range" in c["check_name"]]
+        assert len(temp_checks) == 1
+        # LM35 rated max is 150°C, so 125°C is PASS for generic LM35
+        assert temp_checks[0]["status"] == "PASS"
+        assert not any("TEMPERATURE OVERFLOW" in v for v in res.violations)
+        # But generic uncertainty warning must be present
+        assert any("GENERIC PART NUMBER UNCERTAINTY" in w for w in res.warnings)
+
+    def test_definite_fail_never_overridden_by_unverified_check(self) -> None:
+        """Verify a definite FAIL check guarantees INVALID status even if all other checks are UNVERIFIED."""
+        # Query with only supply voltage (fails voltage check) and no other parameters
+        reqs = {
+            "target_components": ["LM35"],
+            "target_supply_voltage_v": 38.0,  # Fails absolute maximum of 35V
+        }
+        verified_specs = {
+            "supply_voltage_recommended": {"min_v": 4.0, "max_v": 30.0, "page": 4},
+            "supply_voltage_abs_max": {"max_v": 35.0, "page": 4},
+        }
+        val_agent = ValidationAgent()
+        res = val_agent.validate(
+            requirements=reqs,
+            component_info={"part_number": "LM35", "verified_specs": verified_specs},
+        )
+
+        # Voltage check is FAIL; ADC & Load checks are UNVERIFIED
+        has_fail = any(c["status"] == "FAIL" for c in res.checks)
+        has_unverified = any(c["status"] == "UNVERIFIED" for c in res.checks)
+        assert has_fail is True
+        assert has_unverified is True
+        # Must be strictly INVALID, never INCONCLUSIVE
+        assert res.status == "INVALID"
+        assert res.is_valid is False
+
+
+

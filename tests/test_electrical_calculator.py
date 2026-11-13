@@ -190,3 +190,104 @@ class TestElectricalCalculator:
         )
         assert len(viol_check["violations"]) > 0
 
+    def test_sensor_transfer_output_nominal_and_tolerance(self) -> None:
+        """Verify nominal calculations at 0°C, 25°C, 100°C and guaranteed tolerance bounds."""
+        # 0°C
+        t0 = ElectricalCalculator.sensor_transfer_output(temperature_c=0.0)
+        assert t0["output_voltage_mv"] == 0.0
+        assert t0["output_voltage_v"] == 0.0
+        assert t0["formula"] == "V_out = (T * scale_factor) + offset"
+
+        # 25°C nominal
+        t25 = ElectricalCalculator.sensor_transfer_output(temperature_c=25.0)
+        assert t25["output_voltage_mv"] == 250.0
+        assert t25["output_voltage_v"] == 0.25
+
+        # 100°C nominal
+        t100 = ElectricalCalculator.sensor_transfer_output(temperature_c=100.0)
+        assert t100["output_voltage_mv"] == 1000.0
+        assert t100["output_voltage_v"] == 1.0
+
+        # With accuracy tolerance (e.g. ±0.5°C)
+        t25_tol = ElectricalCalculator.sensor_transfer_output(
+            temperature_c=25.0,
+            scale_factor_mv_per_c=10.0,
+            accuracy_tolerance_c=0.5,
+        )
+        assert t25_tol["output_voltage_mv"] == 250.0
+        assert t25_tol["min_output_voltage_mv"] == 245.0
+        assert t25_tol["max_output_voltage_mv"] == 255.0
+        assert t25_tol["min_output_voltage_v"] == 0.245
+        assert t25_tol["max_output_voltage_v"] == 0.255
+        assert t25_tol["tolerance_band_mv"] == 10.0
+
+    def test_adc_compatibility_saturation_failure(self) -> None:
+        """Verify ADC saturation detection when sensor output exceeds ADC full-scale reference."""
+        # LM35 at 100°C produces 1.0V; ADC reference is 0.8V
+        eval_sat = ElectricalCalculator.adc_compatibility_check(
+            max_sensor_voltage_v=1.0,
+            adc_reference_v=0.8,
+            scale_factor_mv_per_c=10.0,
+        )
+        assert eval_sat["is_compatible"] is False
+        assert eval_sat["status"] == "FAIL"
+        assert eval_sat["saturation_temp_c"] == 80.0
+        assert any("ADC SATURATION VIOLATION" in v for v in eval_sat["violations"])
+        assert any("clips at 80.0°C" in v for v in eval_sat["violations"])
+
+    def test_adc_compatibility_passed_with_12bit_quantization_and_caveats(self) -> None:
+        """Verify ADC compatibility pass with 12-bit quantization metrics and analog caveats."""
+        eval_pass = ElectricalCalculator.adc_compatibility_check(
+            max_sensor_voltage_v=1.0,
+            adc_reference_v=3.3,
+            adc_resolution_bits=12,
+            scale_factor_mv_per_c=10.0,
+        )
+        assert eval_pass["is_compatible"] is True
+        assert eval_pass["status"] == "PASS"
+        assert eval_pass["margin_v"] == 2.3
+
+        # Quantization checks for 12-bit (4096 codes) with 3.3V Vref
+        q = eval_pass["quantization"]
+        assert q is not None
+        assert q["total_codes"] == 4096
+        assert abs(q["v_lsb_mv"] - (3300.0 / 4096.0)) < 0.001
+        # Temperature resolution per count: 0.8057 mV / 10 mV/°C = 0.0806 °C/count
+        assert abs(q["temp_resolution_c_per_count"] - 0.0806) < 0.001
+
+        # Analog interface caveats
+        assert len(eval_pass["interface_caveats"]) >= 4
+        assert any("Capacitive Loading" in c for c in eval_pass["interface_caveats"])
+        assert any("Acquisition Time" in c for c in eval_pass["interface_caveats"])
+        assert any("Ground Separation" in c for c in eval_pass["interface_caveats"])
+
+    def test_lm35_variant_temperature_check_limits(self) -> None:
+        """Verify LM35 variant temperature limits against official TI specifications."""
+        # LM35 / LM35A: -55°C to 150°C
+        v_a = ElectricalCalculator.lm35_variant_temperature_check("LM35A", min_temp_c=-50.0, max_temp_c=140.0)
+        assert v_a["is_compatible"] is True
+        assert v_a["status"] == "PASS"
+
+        # LM35C / LM35CA: -40°C to 110°C
+        v_c = ElectricalCalculator.lm35_variant_temperature_check("LM35C", min_temp_c=-40.0, max_temp_c=110.0)
+        assert v_c["is_compatible"] is True
+        assert v_c["status"] == "PASS"
+
+        # LM35D: 0°C to 100°C -> Target 120°C violates max rating
+        v_d_over = ElectricalCalculator.lm35_variant_temperature_check("LM35D", min_temp_c=0.0, max_temp_c=120.0)
+        assert v_d_over["is_compatible"] is False
+        assert v_d_over["status"] == "FAIL"
+        assert any("TEMPERATURE OVERFLOW" in v for v in v_d_over["violations"])
+
+        # LM35D: Target -10°C violates min rating
+        v_d_under = ElectricalCalculator.lm35_variant_temperature_check("LM35D", min_temp_c=-10.0, max_temp_c=90.0)
+        assert v_d_under["is_compatible"] is False
+        assert v_d_under["status"] == "FAIL"
+        assert any("TEMPERATURE UNDERFLOW" in v for v in v_d_under["violations"])
+
+        # Generic LM35 produces uncertainty warning
+        v_gen = ElectricalCalculator.lm35_variant_temperature_check("LM35", min_temp_c=10.0, max_temp_c=80.0)
+        assert v_gen["is_compatible"] is True
+        assert v_gen["is_generic_family"] is True
+        assert any("GENERIC PART NUMBER UNCERTAINTY" in w for w in v_gen["warnings"])
+

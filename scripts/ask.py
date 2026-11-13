@@ -93,6 +93,21 @@ def main() -> int:
         return 1
     except RuntimeError as err:
         print(f"[API Error] {err}")
+        chunks = getattr(err, "retrieved_chunks", [])
+        sources = getattr(err, "sources", [])
+        if chunks:
+            print("\n" + "=" * 70)
+            print("PRESERVED DATASHEET EVIDENCE (Retrieved before generation failure):")
+            print("=" * 70)
+            for idx, chunk in enumerate(chunks, start=1):
+                part = f" | Part: {chunk.get('part_number')}" if chunk.get("part_number") else ""
+                print(f" [{idx}] Source: {chunk.get('source')} | Page: {chunk.get('page')}{part} | ID: {chunk.get('chunk_id')}")
+                if args.show_context and chunk.get("content"):
+                    print(f"     Excerpt: {chunk.get('content')[:180].strip()}...\n")
+            print("=" * 70)
+            print("Note: Datasheet passages were retrieved successfully, but Gemini answer generation failed.")
+            print("No answer has been fabricated.")
+            print("=" * 70)
         return 1
     except Exception as err:
         print(f"[Unexpected Error] {err}")
